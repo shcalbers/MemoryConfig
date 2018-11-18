@@ -4,128 +4,128 @@ using System.IO;
 namespace MemoryConfig
 {
 
-    public partial class MemoryConfig
+    public static class FileHandler
     {
 
-        private static class FileHandler
+        private const long FILE_SIGNATURE = 0x54554E475277;
+        private const int  END_OF_FILE    = -1;
+
+        private enum Token : byte { GROUP_NAME = 1, ENTRY_NAME = 2, ENTRY_VALUE = 4 }
+        private enum Types : byte { INT32, STRING }
+
+        private static bool IsFileValid(long fileSignature)
         {
+            return (fileSignature == FILE_SIGNATURE);
+        }
 
-            private const long FILE_SIGNATURE = 0x54554E475277;
-            private const int  END_OF_FILE    = -1;
+        public static void SerializeConfig(MemoryConfig config, string filePath)
+        {
+            File.WriteAllText(filePath, string.Empty);
 
-            private enum Token : byte { GROUP_NAME = 1, ENTRY_NAME = 2, ENTRY_VALUE = 4 }
-            private enum Types : byte { INT32, STRING }
-
-            private static bool IsFileValid(long fileSignature)
+            using (var file = File.OpenWrite(filePath))
+            using (var writer = new BinaryWriter(file))
             {
-                return (fileSignature == FILE_SIGNATURE);
-            }
+                writer.Write(FILE_SIGNATURE);
 
-            public static void SerializeConfig(MemoryConfig config, string filePath)
-            {
-                File.WriteAllText(filePath, string.Empty);
-
-                using (var file = File.OpenWrite(filePath))
-                using (var writer = new BinaryWriter(file))
+                foreach (var group in config.Groups)
                 {
-                    writer.Write(FILE_SIGNATURE);
+                    if (group.IsEmpty) continue;
 
-                    foreach (var group in config.Groups)
+                    writer.Write((byte)Token.GROUP_NAME);
+                    writer.Write(group.GetName());
+
+                    foreach (var entry in group.Entries)
                     {
-                        if (group.IsEmpty) continue;
+                        if (entry.IsEmpty) continue;
 
-                        writer.Write((byte)Token.GROUP_NAME);
-                        writer.Write(group.GetName());
+                        writer.Write((byte)Token.ENTRY_NAME);
+                        writer.Write(entry.GetName());
+                        writer.Write((byte)Token.ENTRY_VALUE);
 
-                        foreach (var entry in group.Entries)
+                        if (entry.GetValueType() == typeof(int))
                         {
-                            if (entry.IsEmpty) continue;
-
-                            writer.Write((byte)Token.ENTRY_NAME);
-                            writer.Write(entry.GetName());
-                            writer.Write((byte)Token.ENTRY_VALUE);
-
-                            if (entry.GetValueType() == typeof(int))
-                            {
-                                writer.Write((byte)Types.INT32);
-                                writer.Write(entry.GetValue<int>());
-                            }
-                            else if (entry.GetValueType() == typeof(string))
-                            {
-                                writer.Write((byte)Types.STRING);
-                                writer.Write(entry.GetValue<string>());
-                            }
-                            else
-                            {
-                                throw new IOException("Failed to write config! Unknown Value Type: " + entry.GetValueType());
-                            }
+                            writer.Write((byte)Types.INT32);
+                            writer.Write(entry.GetValue<int>());
+                        }
+                        else if (entry.GetValueType() == typeof(string))
+                        {
+                            writer.Write((byte)Types.STRING);
+                            writer.Write(entry.GetValue<string>());
+                        }
+                        else
+                        {
+                            throw new IOException("Failed to write config! Unknown Value Type: " + entry.GetValueType());
                         }
                     }
-
-                    writer.Flush();
                 }
+
+                writer.Flush();
             }
+        }
 
-            public static void DeserializeConfig(MemoryConfig config, string filePath)
+        public static MemoryConfig DeserializeConfig(string filePath)
+        {
+            MemoryConfig config = new MemoryConfig();
+
+            using (var file = File.OpenRead(filePath))
+            using (var reader = new BinaryReader(file))
             {
-                using (var file = File.OpenRead(filePath))
-                using (var reader = new BinaryReader(file))
+                if (file.Length == 0) throw new IOException("'" + filePath + "' is an empty file.");
+                if (!IsFileValid(reader.ReadInt64())) throw new IOException("'" + filePath + "' is not a valid '.mcfg' file.");
+
+                DataGroup currentGroup  = null;
+                string currentEntryName = null;
+
+                byte expectedTokens = (byte)Token.GROUP_NAME;
+
+                while (reader.PeekChar() != END_OF_FILE)
                 {
-                    if (file.Length == 0) throw new IOException("'" + filePath + "' is an empty file.");
-                    if (!IsFileValid( reader.ReadInt64() )) throw new IOException("'" + filePath + "' is not a valid '.mcfg' file.");
+                    byte token = reader.ReadByte();
+                    if ((expectedTokens & token) == 0) throw new IOException("Failed to read '" + filePath + "'! Invalid Token!");
 
-                    DataGroup currentGroup = null;
-                    string currentEntryName = null;
-
-                    byte expectedTokens = (byte)Token.GROUP_NAME;
-
-                    while (reader.PeekChar() != END_OF_FILE)
+                    switch ((Token)token)
                     {
-                        byte token = reader.ReadByte();
-                        if ((expectedTokens & token) == 0) throw new IOException("Failed to read '" + filePath + "'! Invalid Token!");
+                        case Token.ENTRY_VALUE:
+                            byte type = reader.ReadByte();
 
-                        switch ((Token)token)
-                        {
-                            case Token.ENTRY_VALUE:
-                                byte type = reader.ReadByte();
+                            switch (type)
+                            {
+                                case (byte)Types.INT32:
+                                    currentGroup.AddEntry(currentEntryName, reader.ReadInt32());
+                                    break;
 
-                                switch (type)
-                                {
-                                    case (byte)Types.INT32:
-                                        currentGroup.AddEntry(currentEntryName, reader.ReadInt32());
-                                        break;
+                                case (byte)Types.STRING:
+                                    currentGroup.AddEntry(currentEntryName, reader.ReadString());
+                                    break;
 
-                                    case (byte)Types.STRING:
-                                        currentGroup.AddEntry(currentEntryName, reader.ReadString());
-                                        break;
+                                default:
+                                    throw new IOException("Failed to read '" + filePath + "'! Unknown Value Type: " + type);
+                            }
 
-                                    default:
-                                        throw new IOException("Failed to read '" + filePath + "'! Unknown Value Type: " + type);
-                                }
+                            expectedTokens = (byte)Token.ENTRY_NAME | (byte)Token.GROUP_NAME;
+                            break;
 
-                                expectedTokens = (byte)Token.ENTRY_NAME | (byte)Token.GROUP_NAME;
-                                break;
+                        case Token.ENTRY_NAME:
+                            currentEntryName = reader.ReadString();
 
-                            case Token.ENTRY_NAME:
-                                currentEntryName = reader.ReadString();
+                            expectedTokens = (byte)Token.ENTRY_VALUE;
+                            break;
 
-                                expectedTokens = (byte)Token.ENTRY_VALUE;
-                                break;
+                        case Token.GROUP_NAME:
+                            string groupName = reader.ReadString();
 
-                            case Token.GROUP_NAME:
-                                string groupName = reader.ReadString();
+                            config.AddGroup(groupName);
+                            currentGroup = config.GetGroup(groupName);
 
-                                config.AddGroup(groupName);
-                                currentGroup = config.GetGroup(groupName);
-
-                                expectedTokens = (byte)Token.ENTRY_NAME | (byte)Token.GROUP_NAME;
-                                break;
-                        }
+                            expectedTokens = (byte)Token.ENTRY_NAME | (byte)Token.GROUP_NAME;
+                            break;
                     }
                 }
             }
 
+            return config;
         }
 
     }
+
 }
